@@ -1,6 +1,7 @@
 import { Boom } from '@hapi/boom'
 import NodeCache from '@cacheable/node-cache'
 import readline from 'readline'
+import qrcode from 'qrcode-terminal'
 import makeWASocket, { AnyMessageContent, BinaryInfo, CacheStore, delay, DisconnectReason, downloadAndProcessHistorySyncNotification, encodeWAM, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, getHistoryMsg, isJidNewsletter, jidDecode, makeCacheableSignalKeyStore, normalizeMessageContent, PatchedMessageWithRecipientJID, proto, useMultiFileAuthState, WAMessageContent, WAMessageKey } from '../src'
 //import MAIN_LOGGER from '../src/Utils/logger'
 import open from 'open'
@@ -8,23 +9,17 @@ import fs from 'fs'
 import P from 'pino'
 
 const logger = P({
-  level: "trace",
+  level: "warn",
   transport: {
     targets: [
       {
-        target: "pino-pretty", // pretty-print for console
+        target: "pino-pretty",
         options: { colorize: true },
-        level: "trace",
-      },
-      {
-        target: "pino/file", // raw file output
-        options: { destination: './wa-logs.txt' },
-        level: "trace",
+        level: "warn",
       },
     ],
   },
 })
-logger.level = 'trace'
 
 const doReplies = process.argv.includes('--do-reply')
 const usePairingCode = process.argv.includes('--use-pairing-code')
@@ -41,7 +36,9 @@ const question = (text: string) => new Promise<string>((resolve) => rl.question(
 
 // start a connection
 const startSock = async() => {
-	const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info')
+	const authDir = process.env.AUTH_DIR || 'baileys_auth_info'
+	const { state, saveCreds } = await useMultiFileAuthState(authDir)
+	console.log(`使用认证目录: ${authDir}`)
 	// fetch latest version of WA Web
 	const { version, isLatest } = await fetchLatestBaileysVersion()
 	console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`)
@@ -51,15 +48,11 @@ const startSock = async() => {
 		logger,
 		auth: {
 			creds: state.creds,
-			/** caching makes the store faster to send/recv messages */
 			keys: makeCacheableSignalKeyStore(state.keys, logger),
 		},
 		msgRetryCounterCache,
 		generateHighQualityLinkPreview: true,
-		// ignore all broadcast messages -- to receive the same
-		// comment the line below out
-		// shouldIgnoreJid: jid => isJidBroadcast(jid),
-		// implement to handle retries & poll updates
+		syncFullHistory: false, // 关闭完整历史同步，减少超时警告
 		getMessage
 	})
 
@@ -93,7 +86,14 @@ const startSock = async() => {
 			// maybe it closed, or we received all offline message or connection opened
 			if(events['connection.update']) {
 				const update = events['connection.update']
-				const { connection, lastDisconnect } = update
+				const { connection, lastDisconnect, qr } = update
+
+				// 显示二维码
+				if(qr) {
+					console.log('\n扫描下方二维码登录 WhatsApp:\n')
+					qrcode.generate(qr, { small: true })
+				}
+
 				if(connection === 'close') {
 					// reconnect if not logged out
 					if((lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut) {
@@ -102,6 +102,11 @@ const startSock = async() => {
 						console.log('Connection closed. You are logged out.')
 					}
 				}
+
+				if(connection === 'open') {
+					console.log('\n✓ 已成功连接到 WhatsApp!\n')
+				}
+
 				console.log('connection update', update)
 			}
 
@@ -156,6 +161,14 @@ const startSock = async() => {
               if (text == "onDemandHistSync") {
                 const messageId = await sock.fetchMessageHistory(50, msg.key, msg.messageTimestamp!)
                 console.log('requested on-demand sync, id=', messageId)
+              }
+
+              // ping-pong 测试
+              if (!msg.key.fromMe && text?.toLowerCase() === 'ping') {
+                const randomDelay = 500 + Math.random() * 1500 // 0.5-2秒随机延迟
+                console.log(`收到 ping，${Math.round(randomDelay)}ms 后回复 pong`)
+                await delay(randomDelay)
+                await sock.sendMessage(msg.key.remoteJid!, { text: 'pong' })
               }
 
               if (!msg.key.fromMe && doReplies && !isJidNewsletter(msg.key?.remoteJid!)) {
