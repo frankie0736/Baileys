@@ -208,6 +208,7 @@ bun run ./Example/gateway.ts
 - `PORT`：API 端口（默认 3001）
 - `WEBHOOK_URL`：消息推送地址（默认 http://localhost:3002/webhook）
 - `AUTH_DIR`：认证目录（默认 baileys_auth_info）
+- `MEDIA_DIR`：媒体文件保存目录（默认 ./received_media）
 
 #### 启动 Webhook 服务
 
@@ -217,31 +218,124 @@ bun run ./Example/webhook-server.ts
 
 #### Gateway API
 
-**发送消息**
+**发送文本消息**
 ```bash
 curl -X POST http://localhost:3001/send \
   -H "Content-Type: application/json" \
   -d '{"to": "8613800138000", "message": "Hello!"}'
 ```
 
-**检查号码**
+**发送图片**
 ```bash
-curl http://localhost:3001/check/8613800138000
+curl -X POST http://localhost:3001/send-image \
+  -H "Content-Type: application/json" \
+  -d '{"to": "8613800138000", "imagePath": "./Example/brightex.jpg", "caption": "图片说明"}'
+```
+
+**发送视频**
+```bash
+curl -X POST http://localhost:3001/send-video \
+  -H "Content-Type: application/json" \
+  -d '{"to": "8613800138000", "videoPath": "./Example/video.mp4", "caption": "视频说明"}'
+```
+
+**发送文件/文档**
+```bash
+curl -X POST http://localhost:3001/send-file \
+  -H "Content-Type: application/json" \
+  -d '{"to": "8613800138000", "filePath": "./Example/PDF-file.pdf", "filename": "文档.pdf"}'
 ```
 
 #### Webhook 接收格式
 
-Gateway 收到消息后会 POST 到 WEBHOOK_URL：
+Gateway 收到消息后会 POST 到 WEBHOOK_URL。
 
+**文本消息**
 ```json
 {
   "from": "8613800138000@s.whatsapp.net",
+  "type": "text",
   "text": "用户发送的消息",
   "pushName": "用户名",
   "messageId": "消息ID",
   "timestamp": 1234567890
 }
 ```
+
+**图片消息**
+```json
+{
+  "from": "8613800138000@s.whatsapp.net",
+  "type": "image",
+  "caption": "图片说明",
+  "mimetype": "image/jpeg",
+  "filename": "image_1234567890.jpeg",
+  "savedPath": "received_media/image_1234567890.jpeg",
+  "pushName": "用户名",
+  "messageId": "消息ID",
+  "timestamp": 1234567890
+}
+```
+
+**视频消息**
+```json
+{
+  "from": "8613800138000@s.whatsapp.net",
+  "type": "video",
+  "caption": "视频说明",
+  "mimetype": "video/mp4",
+  "filename": "video_1234567890.mp4",
+  "savedPath": "received_media/video_1234567890.mp4",
+  "pushName": "用户名",
+  "messageId": "消息ID",
+  "timestamp": 1234567890
+}
+```
+
+**文档消息**
+```json
+{
+  "from": "8613800138000@s.whatsapp.net",
+  "type": "document",
+  "filename": "原始文件名.pdf",
+  "mimetype": "application/pdf",
+  "savedPath": "received_media/doc_1234567890_原始文件名.pdf",
+  "pushName": "用户名",
+  "messageId": "消息ID",
+  "timestamp": 1234567890
+}
+```
+
+**语音消息**
+```json
+{
+  "from": "8613800138000@s.whatsapp.net",
+  "type": "audio",
+  "mimetype": "audio/ogg",
+  "ptt": true,
+  "filename": "audio_1234567890.ogg",
+  "savedPath": "received_media/audio_1234567890.ogg",
+  "pushName": "用户名",
+  "messageId": "消息ID",
+  "timestamp": 1234567890
+}
+```
+
+#### 媒体文件存储
+
+收到的媒体文件自动保存到 `received_media/` 目录（可通过 `MEDIA_DIR` 环境变量配置）。
+
+#### 测试命令
+
+启动 Gateway 和 Webhook 后，可以发送以下文字触发机器人回复媒体：
+
+| 发送文字 | 机器人回复 |
+|---------|-----------|
+| `ping` | pong |
+| `图片` 或 `image` | 测试图片 |
+| `视频` 或 `video` | 测试视频 |
+| `文件` 或 `pdf` | 测试 PDF |
+| 发送图片/视频/文档 | 确认收到 + 保存路径 |
 
 ---
 

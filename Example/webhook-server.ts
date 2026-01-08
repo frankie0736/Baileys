@@ -1,8 +1,7 @@
 /**
  * Webhook 服务 - 接收消息并回复
  *
- * 这是你的"业务逻辑"服务
- * 收到 gateway 推送的消息后，调用 gateway API 回复
+ * 支持处理：文本、图片、视频、文档、语音
  */
 
 import { Hono } from 'hono'
@@ -11,41 +10,128 @@ const app = new Hono()
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3001'
 
+// 测试文件路径（用于回复媒体）
+const TEST_IMAGE = './Example/brightex.jpg'
+const TEST_VIDEO = './Example/video.mp4'
+const TEST_PDF = './Example/PDF-file.pdf'
+
 // 接收 webhook
 app.post('/webhook', async (c) => {
-	const { from, text, pushName } = await c.req.json()
+	const payload = await c.req.json()
+	const { from, type, pushName, text, filename, savedPath } = payload
 
-	console.log(`📩 收到消息: [${pushName}] ${text}`)
+	console.log(`📩 收到 ${type} 消息: [${pushName}]`, type === 'text' ? text : filename || '')
 
-	// ============ 你的业务逻辑 ============
-	let reply: string | null = null
+	// ============ 业务逻辑 ============
+	let replyText: string | null = null
+	let replyMedia: { type: 'image' | 'video' | 'file', path: string, caption?: string } | null = null
 
-	if (text.toLowerCase() === 'ping') {
-		reply = 'pong'
-	} else if (text.includes('你好')) {
-		reply = `你好 ${pushName}！有什么可以帮助你的？`
+	switch (type) {
+		case 'text':
+			// 文本消息处理
+			if (text?.toLowerCase() === 'ping') {
+				replyText = 'pong'
+			} else if (text?.includes('你好')) {
+				replyText = `你好 ${pushName}！有什么可以帮助你的？`
+			} else if (text?.toLowerCase() === '图片' || text?.toLowerCase() === 'image') {
+				// 用户发"图片"，回复测试图片
+				replyMedia = { type: 'image', path: TEST_IMAGE, caption: '这是测试图片' }
+			} else if (text?.toLowerCase() === '视频' || text?.toLowerCase() === 'video') {
+				// 用户发"视频"，回复测试视频
+				replyMedia = { type: 'video', path: TEST_VIDEO, caption: '这是测试视频' }
+			} else if (text?.toLowerCase() === '文件' || text?.toLowerCase() === 'pdf' || text?.toLowerCase() === 'file') {
+				// 用户发"文件"或"pdf"，回复测试 PDF
+				replyMedia = { type: 'file', path: TEST_PDF }
+			}
+			break
+
+		case 'image':
+			replyText = `✅ 收到【图片】，已保存`
+			if (savedPath) {
+				replyText += `\n📁 文件路径: ${savedPath}`
+			}
+			break
+
+		case 'video':
+			replyText = `✅ 收到【视频】，已保存`
+			if (savedPath) {
+				replyText += `\n📁 文件路径: ${savedPath}`
+			}
+			break
+
+		case 'document':
+			replyText = `✅ 收到【文档】\n📄 文件名: ${filename || '未知'}`
+			if (savedPath) {
+				replyText += `\n📁 文件路径: ${savedPath}`
+			}
+			break
+
+		case 'audio':
+			replyText = `✅ 收到【语音消息】，已保存`
+			if (savedPath) {
+				replyText += `\n📁 文件路径: ${savedPath}`
+			}
+			break
+
+		default:
+			replyText = `📦 收到消息类型: ${type}`
 	}
-	// 可以加更多逻辑...
 
-	// ============ 回复消息 ============
-	if (reply) {
-		try {
+	// ============ 发送回复 ============
+	try {
+		if (replyMedia) {
+			// 回复媒体
+			let endpoint = ''
+			let body: Record<string, any> = { to: from }
+
+			if (replyMedia.type === 'image') {
+				endpoint = '/send-image'
+				body.imagePath = replyMedia.path
+				body.caption = replyMedia.caption
+			} else if (replyMedia.type === 'video') {
+				endpoint = '/send-video'
+				body.videoPath = replyMedia.path
+				body.caption = replyMedia.caption
+			} else if (replyMedia.type === 'file') {
+				endpoint = '/send-file'
+				body.filePath = replyMedia.path
+			}
+
+			const res = await fetch(`${GATEWAY_URL}${endpoint}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+			})
+			const result = await res.json()
+			console.log(`📤 已回复媒体 (${replyMedia.type}):`, result)
+
+		} else if (replyText) {
+			// 回复文本
 			const res = await fetch(`${GATEWAY_URL}/send`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ to: from, message: reply }),
+				body: JSON.stringify({ to: from, message: replyText }),
 			})
 			const result = await res.json()
-			console.log(`📤 已回复: ${reply}`, result)
-		} catch (err) {
-			console.log(`⚠️  回复失败: ${err}`)
+			console.log(`📤 已回复文本: ${replyText}`, result)
 		}
+	} catch (err) {
+		console.log(`⚠️  回复失败: ${err}`)
 	}
 
 	return c.json({ ok: true })
 })
 
-app.get('/', (c) => c.json({ status: 'webhook server running' }))
+app.get('/', (c) => c.json({
+	status: 'webhook server running',
+	commands: {
+		'ping': '回复 pong',
+		'图片/image': '回复测试图片',
+		'视频/video': '回复测试视频',
+		'文件/pdf/file': '回复测试 PDF',
+		'发送图片/视频/文档': '自动回复确认收到'
+	}
+}))
 
 export default {
 	port: 3002,
@@ -53,3 +139,4 @@ export default {
 }
 
 console.log('🎯 Webhook 服务启动在 http://localhost:3002')
+console.log('📝 可用命令: ping, 图片, 视频, 文件')
