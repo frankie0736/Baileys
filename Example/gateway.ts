@@ -36,14 +36,21 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://localhost:3002/webhook'
 const AUTH_DIR = process.env.AUTH_DIR || 'baileys_auth_info'
 const MEDIA_DIR = process.env.MEDIA_DIR || './received_media'
 
-// 模拟人类行为配置
+// 模拟人类行为配置（智能延迟）
 const HUMAN_LIKE = {
-	INITIAL_DELAY: { min: 1000, max: 5000 }, // 收到消息后的初始延迟 (ms)
-	READ_DELAY: { min: 300, max: 800 },      // 已读前的延迟 (ms)
-	BEFORE_TYPING_DELAY: { min: 500, max: 1500 }, // 已读后、typing 前的延迟 (ms)
-	TYPING_DELAY: { min: 800, max: 2000 },   // typing 状态持续时间 (ms)
-	TYPING_PER_CHAR: 50,                      // 每个字符的打字时间 (ms)
-	MAX_TYPING_TIME: 5000,                    // 最大 typing 时间 (ms)
+	// 基础延迟
+	INITIAL_DELAY: { min: 1000, max: 3000 },      // 收到消息后的初始延迟 (ms)
+	READ_DELAY: { min: 200, max: 500 },           // 已读前的基础延迟 (ms)
+	BEFORE_TYPING_DELAY: { min: 300, max: 800 },  // 已读后、typing 前的基础延迟 (ms)
+	TYPING_DELAY: { min: 500, max: 1500 },        // typing 状态基础时间 (ms)
+
+	// 智能延迟系数（与内容长度相关）
+	READ_PER_CHAR: 30,                            // 每字符增加的阅读时间 (ms)
+	MAX_READ_TIME: 3000,                          // 最大阅读时间 (ms)
+	THINKING_PER_CHAR: 20,                        // 每字符增加的思考时间 (ms)
+	MAX_THINKING_TIME: 2000,                      // 最大思考时间 (ms)
+	TYPING_PER_CHAR: 50,                          // 每字符的打字时间 (ms)
+	MAX_TYPING_TIME: 8000,                        // 最大 typing 时间 (ms)
 }
 
 const logger = P({ level: 'silent' })
@@ -64,28 +71,48 @@ function randomDelay(min: number, max: number): number {
 	return min + Math.random() * (max - min)
 }
 
-// 根据消息长度计算 typing 时间
-function calculateTypingTime(message: string): number {
-	const baseTime = HUMAN_LIKE.TYPING_DELAY.min
-	const charTime = message.length * HUMAN_LIKE.TYPING_PER_CHAR
-	const randomExtra = randomDelay(0, HUMAN_LIKE.TYPING_DELAY.max - HUMAN_LIKE.TYPING_DELAY.min)
-	return Math.min(baseTime + charTime + randomExtra, HUMAN_LIKE.MAX_TYPING_TIME)
+// 根据输入消息长度计算阅读时间
+function calculateReadTime(inputLength: number): number {
+	const baseTime = randomDelay(HUMAN_LIKE.READ_DELAY.min, HUMAN_LIKE.READ_DELAY.max)
+	const charTime = inputLength * HUMAN_LIKE.READ_PER_CHAR
+	return Math.min(baseTime + charTime, HUMAN_LIKE.MAX_READ_TIME)
 }
 
-// 模拟人类发送消息流程
+// 根据输入消息长度计算思考时间
+function calculateThinkingTime(inputLength: number): number {
+	const baseTime = randomDelay(HUMAN_LIKE.BEFORE_TYPING_DELAY.min, HUMAN_LIKE.BEFORE_TYPING_DELAY.max)
+	const charTime = inputLength * HUMAN_LIKE.THINKING_PER_CHAR
+	return Math.min(baseTime + charTime, HUMAN_LIKE.MAX_THINKING_TIME)
+}
+
+// 根据输出消息长度计算 typing 时间
+function calculateTypingTime(outputLength: number): number {
+	const baseTime = randomDelay(HUMAN_LIKE.TYPING_DELAY.min, HUMAN_LIKE.TYPING_DELAY.max)
+	const charTime = outputLength * HUMAN_LIKE.TYPING_PER_CHAR
+	return Math.min(baseTime + charTime, HUMAN_LIKE.MAX_TYPING_TIME)
+}
+
+// 模拟人类发送消息流程（智能延迟与内容长度相关）
 async function humanLikeSend(
 	jid: string,
-	content: Parameters<typeof sock.sendMessage>[1],
+	content: Parameters<NonNullable<typeof sock>['sendMessage']>[1],
 	options?: {
 		messageKey?: { id: string; remoteJid: string; fromMe?: boolean; participant?: string };
 		skipRead?: boolean;
 		skipTyping?: boolean;
 		skipInitialDelay?: boolean;
+		inputLength?: number;  // 输入消息长度（用于计算阅读和思考时间）
 	}
 ) {
 	if (!sock) throw new Error('未连接 WhatsApp')
 
-	const { messageKey, skipRead = false, skipTyping = false, skipInitialDelay = false } = options || {}
+	const {
+		messageKey,
+		skipRead = false,
+		skipTyping = false,
+		skipInitialDelay = false,
+		inputLength = 0
+	} = options || {}
 
 	// 0. 初始延迟（模拟人看到消息后的反应时间）
 	if (!skipInitialDelay) {
@@ -94,9 +121,11 @@ async function humanLikeSend(
 		await delay(initialWait)
 	}
 
-	// 1. 标记已读（如果有原消息）
+	// 1. 标记已读（延迟与输入消息长度相关）
 	if (!skipRead && messageKey) {
-		await delay(randomDelay(HUMAN_LIKE.READ_DELAY.min, HUMAN_LIKE.READ_DELAY.max))
+		const readWait = calculateReadTime(inputLength)
+		console.log(`📖 阅读中 ${Math.round(readWait)}ms...`)
+		await delay(readWait)
 		try {
 			await sock.readMessages([messageKey])
 			console.log(`👁️  已标记已读`)
@@ -105,27 +134,25 @@ async function humanLikeSend(
 		}
 	}
 
-	// 2. 已读后、typing 前的延迟
+	// 2. 已读后、typing 前的延迟（思考时间与输入长度相关）
 	if (!skipTyping) {
-		const beforeTypingWait = randomDelay(HUMAN_LIKE.BEFORE_TYPING_DELAY.min, HUMAN_LIKE.BEFORE_TYPING_DELAY.max)
-		console.log(`💭 思考中 ${Math.round(beforeTypingWait)}ms...`)
-		await delay(beforeTypingWait)
+		const thinkingWait = calculateThinkingTime(inputLength)
+		console.log(`💭 思考中 ${Math.round(thinkingWait)}ms...`)
+		await delay(thinkingWait)
 	}
 
-	// 3. 发送 typing 状态
+	// 3. 发送 typing 状态（时间与输出长度相关）
 	if (!skipTyping) {
 		try {
 			await sock.sendPresenceUpdate('composing', jid)
 			console.log(`⌨️  正在输入...`)
 
-			// 根据内容计算 typing 时间
-			let typingTime = HUMAN_LIKE.TYPING_DELAY.min
+			// 根据输出内容长度计算 typing 时间
+			let outputLength = 0
 			if ('text' in content && typeof content.text === 'string') {
-				typingTime = calculateTypingTime(content.text)
-			} else {
-				// 媒体消息使用固定时间
-				typingTime = randomDelay(1000, 2000)
+				outputLength = content.text.length
 			}
+			const typingTime = calculateTypingTime(outputLength)
 
 			await delay(typingTime)
 
@@ -136,7 +163,7 @@ async function humanLikeSend(
 		}
 	}
 
-	// 3. 发送消息
+	// 4. 发送消息
 	const result = await sock.sendMessage(jid, content)
 	return result
 }
@@ -322,11 +349,11 @@ app.get('/', (c) => c.json({
 	humanLikeConfig: HUMAN_LIKE,
 }))
 
-// 发送文本消息（模拟人类行为）
+// 发送文本消息（模拟人类行为，智能延迟）
 app.post('/send', async (c) => {
 	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
 
-	const { to, message, messageKey, skipRead, skipTyping, skipInitialDelay } = await c.req.json()
+	const { to, message, messageKey, skipRead, skipTyping, skipInitialDelay, inputLength } = await c.req.json()
 	if (!to || !message) {
 		return c.json({ error: '缺少 to 或 message' }, 400)
 	}
@@ -334,8 +361,14 @@ app.post('/send', async (c) => {
 	const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
 
 	try {
-		const result = await humanLikeSend(jid, { text: message }, { messageKey, skipRead, skipTyping, skipInitialDelay })
-		console.log(`📤 已发送文本到 ${to}: ${message}`)
+		const result = await humanLikeSend(jid, { text: message }, {
+			messageKey,
+			skipRead,
+			skipTyping,
+			skipInitialDelay,
+			inputLength: inputLength || 0,  // 用于智能延迟计算
+		})
+		console.log(`📤 已发送文本到 ${to}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`)
 		return c.json({ success: true, messageId: result?.key.id })
 	} catch (err) {
 		console.log(`⚠️  发送失败: ${err}`)

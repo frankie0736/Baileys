@@ -21,6 +21,8 @@ wa-logs.txt
 coverage
 .claude/
 received_media/
+chat_history/
 Example/*.jpg
 Example/*.mp4
 Example/*.pdf
+.claude/hooks/.inject-state.json
