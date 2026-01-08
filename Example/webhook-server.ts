@@ -2,6 +2,7 @@
  * Webhook 服务 - 接收消息并回复
  *
  * 支持处理：文本、图片、视频、文档、语音
+ * 模拟人类行为：已读 → typing → 发送
  */
 
 import { Hono } from 'hono'
@@ -18,7 +19,7 @@ const TEST_PDF = './Example/PDF-file.pdf'
 // 接收 webhook
 app.post('/webhook', async (c) => {
 	const payload = await c.req.json()
-	const { from, type, pushName, text, filename, savedPath } = payload
+	const { from, type, pushName, text, filename, savedPath, messageKey } = payload
 
 	console.log(`📩 收到 ${type} 消息: [${pushName}]`, type === 'text' ? text : filename || '')
 
@@ -29,19 +30,24 @@ app.post('/webhook', async (c) => {
 	switch (type) {
 		case 'text':
 			// 文本消息处理
-			if (text?.toLowerCase() === 'ping') {
+			const lowerText = text?.toLowerCase() || ''
+
+			if (lowerText === 'ping') {
 				replyText = 'pong'
 			} else if (text?.includes('你好')) {
 				replyText = `你好 ${pushName}！有什么可以帮助你的？`
-			} else if (text?.toLowerCase() === '图片' || text?.toLowerCase() === 'image') {
+			} else if (lowerText === '图片' || lowerText === 'image') {
 				// 用户发"图片"，回复测试图片
 				replyMedia = { type: 'image', path: TEST_IMAGE, caption: '这是测试图片' }
-			} else if (text?.toLowerCase() === '视频' || text?.toLowerCase() === 'video') {
+			} else if (lowerText === '视频' || lowerText === 'video') {
 				// 用户发"视频"，回复测试视频
 				replyMedia = { type: 'video', path: TEST_VIDEO, caption: '这是测试视频' }
-			} else if (text?.toLowerCase() === '文件' || text?.toLowerCase() === 'pdf' || text?.toLowerCase() === 'file') {
+			} else if (lowerText === '文件' || lowerText === 'pdf' || lowerText === 'file') {
 				// 用户发"文件"或"pdf"，回复测试 PDF
 				replyMedia = { type: 'file', path: TEST_PDF }
+			} else {
+				// 默认回复：收到
+				replyText = '收到'
 			}
 			break
 
@@ -77,12 +83,15 @@ app.post('/webhook', async (c) => {
 			replyText = `📦 收到消息类型: ${type}`
 	}
 
-	// ============ 发送回复 ============
+	// ============ 发送回复（带模拟人类行为）============
 	try {
 		if (replyMedia) {
 			// 回复媒体
 			let endpoint = ''
-			let body: Record<string, any> = { to: from }
+			let body: Record<string, any> = {
+				to: from,
+				messageKey,  // 传递 messageKey 用于标记已读
+			}
 
 			if (replyMedia.type === 'image') {
 				endpoint = '/send-image'
@@ -110,7 +119,11 @@ app.post('/webhook', async (c) => {
 			const res = await fetch(`${GATEWAY_URL}/send`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ to: from, message: replyText }),
+				body: JSON.stringify({
+					to: from,
+					message: replyText,
+					messageKey,  // 传递 messageKey 用于标记已读
+				}),
 			})
 			const result = await res.json()
 			console.log(`📤 已回复文本: ${replyText}`, result)
@@ -126,11 +139,14 @@ app.get('/', (c) => c.json({
 	status: 'webhook server running',
 	commands: {
 		'ping': '回复 pong',
+		'你好': '回复问候',
 		'图片/image': '回复测试图片',
 		'视频/video': '回复测试视频',
 		'文件/pdf/file': '回复测试 PDF',
+		'其他文字': '回复"收到"',
 		'发送图片/视频/文档': '自动回复确认收到'
-	}
+	},
+	humanLikeBehavior: '已读 → typing → 发送'
 }))
 
 export default {
@@ -139,4 +155,6 @@ export default {
 }
 
 console.log('🎯 Webhook 服务启动在 http://localhost:3002')
-console.log('📝 可用命令: ping, 图片, 视频, 文件')
+console.log('📝 可用命令: ping, 你好, 图片, 视频, 文件')
+console.log('🤖 其他文字会回复"收到"')
+console.log('👤 模拟人类行为: 已读 → typing → 发送')

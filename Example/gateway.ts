@@ -1,15 +1,17 @@
 /**
- * WhatsApp Gateway - 支持媒体收发
+ * WhatsApp Gateway - 支持媒体收发 + 模拟人类行为
  *
  * 功能：
  * 1. 收到消息（文本/图片/视频/文档） → 调用外部 WEBHOOK_URL
- * 2. 暴露 API 用于发送消息
+ * 2. 暴露 API 用于发送消息（自动模拟人类行为：已读→typing→发送）
  *
  * API：
  * - POST /send        发送文本
  * - POST /send-image  发送图片
  * - POST /send-video  发送视频
  * - POST /send-file   发送文件
+ * - POST /read        标记消息已读
+ * - POST /typing      发送 typing 状态
  */
 
 import { Hono } from 'hono'
@@ -34,6 +36,16 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://localhost:3002/webhook'
 const AUTH_DIR = process.env.AUTH_DIR || 'baileys_auth_info'
 const MEDIA_DIR = process.env.MEDIA_DIR || './received_media'
 
+// 模拟人类行为配置
+const HUMAN_LIKE = {
+	INITIAL_DELAY: { min: 1000, max: 5000 }, // 收到消息后的初始延迟 (ms)
+	READ_DELAY: { min: 300, max: 800 },      // 已读前的延迟 (ms)
+	BEFORE_TYPING_DELAY: { min: 500, max: 1500 }, // 已读后、typing 前的延迟 (ms)
+	TYPING_DELAY: { min: 800, max: 2000 },   // typing 状态持续时间 (ms)
+	TYPING_PER_CHAR: 50,                      // 每个字符的打字时间 (ms)
+	MAX_TYPING_TIME: 5000,                    // 最大 typing 时间 (ms)
+}
+
 const logger = P({ level: 'silent' })
 const app = new Hono()
 
@@ -43,6 +55,90 @@ let sock: ReturnType<typeof makeWASocket> | null = null
 // 确保媒体目录存在
 if (!existsSync(MEDIA_DIR)) {
 	await mkdir(MEDIA_DIR, { recursive: true })
+}
+
+// ============ 工具函数 ============
+
+// 随机延迟
+function randomDelay(min: number, max: number): number {
+	return min + Math.random() * (max - min)
+}
+
+// 根据消息长度计算 typing 时间
+function calculateTypingTime(message: string): number {
+	const baseTime = HUMAN_LIKE.TYPING_DELAY.min
+	const charTime = message.length * HUMAN_LIKE.TYPING_PER_CHAR
+	const randomExtra = randomDelay(0, HUMAN_LIKE.TYPING_DELAY.max - HUMAN_LIKE.TYPING_DELAY.min)
+	return Math.min(baseTime + charTime + randomExtra, HUMAN_LIKE.MAX_TYPING_TIME)
+}
+
+// 模拟人类发送消息流程
+async function humanLikeSend(
+	jid: string,
+	content: Parameters<typeof sock.sendMessage>[1],
+	options?: {
+		messageKey?: { id: string; remoteJid: string; fromMe?: boolean; participant?: string };
+		skipRead?: boolean;
+		skipTyping?: boolean;
+		skipInitialDelay?: boolean;
+	}
+) {
+	if (!sock) throw new Error('未连接 WhatsApp')
+
+	const { messageKey, skipRead = false, skipTyping = false, skipInitialDelay = false } = options || {}
+
+	// 0. 初始延迟（模拟人看到消息后的反应时间）
+	if (!skipInitialDelay) {
+		const initialWait = randomDelay(HUMAN_LIKE.INITIAL_DELAY.min, HUMAN_LIKE.INITIAL_DELAY.max)
+		console.log(`⏳ 等待 ${Math.round(initialWait)}ms 后开始处理...`)
+		await delay(initialWait)
+	}
+
+	// 1. 标记已读（如果有原消息）
+	if (!skipRead && messageKey) {
+		await delay(randomDelay(HUMAN_LIKE.READ_DELAY.min, HUMAN_LIKE.READ_DELAY.max))
+		try {
+			await sock.readMessages([messageKey])
+			console.log(`👁️  已标记已读`)
+		} catch (err) {
+			console.log(`⚠️  标记已读失败: ${err}`)
+		}
+	}
+
+	// 2. 已读后、typing 前的延迟
+	if (!skipTyping) {
+		const beforeTypingWait = randomDelay(HUMAN_LIKE.BEFORE_TYPING_DELAY.min, HUMAN_LIKE.BEFORE_TYPING_DELAY.max)
+		console.log(`💭 思考中 ${Math.round(beforeTypingWait)}ms...`)
+		await delay(beforeTypingWait)
+	}
+
+	// 3. 发送 typing 状态
+	if (!skipTyping) {
+		try {
+			await sock.sendPresenceUpdate('composing', jid)
+			console.log(`⌨️  正在输入...`)
+
+			// 根据内容计算 typing 时间
+			let typingTime = HUMAN_LIKE.TYPING_DELAY.min
+			if ('text' in content && typeof content.text === 'string') {
+				typingTime = calculateTypingTime(content.text)
+			} else {
+				// 媒体消息使用固定时间
+				typingTime = randomDelay(1000, 2000)
+			}
+
+			await delay(typingTime)
+
+			// 停止 typing
+			await sock.sendPresenceUpdate('paused', jid)
+		} catch (err) {
+			console.log(`⚠️  发送 typing 状态失败: ${err}`)
+		}
+	}
+
+	// 3. 发送消息
+	const result = await sock.sendMessage(jid, content)
+	return result
 }
 
 // ============ WhatsApp 连接 ============
@@ -102,6 +198,13 @@ async function initWhatsApp() {
 				messageId: msg.key.id,
 				timestamp: msg.messageTimestamp,
 				type: 'text', // 默认
+				// 传递消息 key，用于后续标记已读
+				messageKey: {
+					id: msg.key.id,
+					remoteJid: msg.key.remoteJid,
+					fromMe: msg.key.fromMe,
+					participant: msg.key.participant,
+				},
 			}
 
 			// 处理不同类型的消息
@@ -215,97 +318,153 @@ async function initWhatsApp() {
 app.get('/', (c) => c.json({
 	status: 'ok',
 	connected: !!sock,
-	webhook: WEBHOOK_URL
+	webhook: WEBHOOK_URL,
+	humanLikeConfig: HUMAN_LIKE,
 }))
 
-// 发送文本消息
+// 发送文本消息（模拟人类行为）
 app.post('/send', async (c) => {
 	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
 
-	const { to, message } = await c.req.json()
+	const { to, message, messageKey, skipRead, skipTyping, skipInitialDelay } = await c.req.json()
 	if (!to || !message) {
 		return c.json({ error: '缺少 to 或 message' }, 400)
 	}
 
 	const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
 
-	const randomDelay = 500 + Math.random() * 1000
-	await delay(randomDelay)
-
-	const result = await sock.sendMessage(jid, { text: message })
-	console.log(`📤 已发送文本到 ${to}: ${message}`)
-
-	return c.json({ success: true, messageId: result?.key.id })
+	try {
+		const result = await humanLikeSend(jid, { text: message }, { messageKey, skipRead, skipTyping, skipInitialDelay })
+		console.log(`📤 已发送文本到 ${to}: ${message}`)
+		return c.json({ success: true, messageId: result?.key.id })
+	} catch (err) {
+		console.log(`⚠️  发送失败: ${err}`)
+		return c.json({ error: String(err) }, 500)
+	}
 })
 
-// 发送图片
+// 发送图片（模拟人类行为）
 app.post('/send-image', async (c) => {
 	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
 
-	const { to, imagePath, caption } = await c.req.json()
+	const { to, imagePath, caption, messageKey, skipRead, skipTyping, skipInitialDelay } = await c.req.json()
 	if (!to || !imagePath) {
 		return c.json({ error: '缺少 to 或 imagePath' }, 400)
 	}
 
 	const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
 
-	const randomDelay = 500 + Math.random() * 1000
-	await delay(randomDelay)
-
-	const result = await sock.sendMessage(jid, {
-		image: { url: imagePath },
-		caption: caption || ''
-	})
-	console.log(`🖼️  已发送图片到 ${to}: ${imagePath}`)
-
-	return c.json({ success: true, messageId: result?.key.id })
+	try {
+		const result = await humanLikeSend(
+			jid,
+			{ image: { url: imagePath }, caption: caption || '' },
+			{ messageKey, skipRead, skipTyping, skipInitialDelay }
+		)
+		console.log(`🖼️  已发送图片到 ${to}: ${imagePath}`)
+		return c.json({ success: true, messageId: result?.key.id })
+	} catch (err) {
+		console.log(`⚠️  发送失败: ${err}`)
+		return c.json({ error: String(err) }, 500)
+	}
 })
 
-// 发送视频
+// 发送视频（模拟人类行为）
 app.post('/send-video', async (c) => {
 	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
 
-	const { to, videoPath, caption } = await c.req.json()
+	const { to, videoPath, caption, messageKey, skipRead, skipTyping, skipInitialDelay } = await c.req.json()
 	if (!to || !videoPath) {
 		return c.json({ error: '缺少 to 或 videoPath' }, 400)
 	}
 
 	const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
 
-	const randomDelay = 500 + Math.random() * 1000
-	await delay(randomDelay)
-
-	const result = await sock.sendMessage(jid, {
-		video: { url: videoPath },
-		caption: caption || ''
-	})
-	console.log(`🎬 已发送视频到 ${to}: ${videoPath}`)
-
-	return c.json({ success: true, messageId: result?.key.id })
+	try {
+		const result = await humanLikeSend(
+			jid,
+			{ video: { url: videoPath }, caption: caption || '' },
+			{ messageKey, skipRead, skipTyping, skipInitialDelay }
+		)
+		console.log(`🎬 已发送视频到 ${to}: ${videoPath}`)
+		return c.json({ success: true, messageId: result?.key.id })
+	} catch (err) {
+		console.log(`⚠️  发送失败: ${err}`)
+		return c.json({ error: String(err) }, 500)
+	}
 })
 
-// 发送文件/文档
+// 发送文件/文档（模拟人类行为）
 app.post('/send-file', async (c) => {
 	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
 
-	const { to, filePath, filename, mimetype } = await c.req.json()
+	const { to, filePath, filename, mimetype, messageKey, skipRead, skipTyping, skipInitialDelay } = await c.req.json()
 	if (!to || !filePath) {
 		return c.json({ error: '缺少 to 或 filePath' }, 400)
 	}
 
 	const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
 
-	const randomDelay = 500 + Math.random() * 1000
-	await delay(randomDelay)
+	try {
+		const result = await humanLikeSend(
+			jid,
+			{
+				document: { url: filePath },
+				fileName: filename || filePath.split('/').pop() || 'file',
+				mimetype: mimetype || 'application/octet-stream'
+			},
+			{ messageKey, skipRead, skipTyping, skipInitialDelay }
+		)
+		console.log(`📄 已发送文件到 ${to}: ${filePath}`)
+		return c.json({ success: true, messageId: result?.key.id })
+	} catch (err) {
+		console.log(`⚠️  发送失败: ${err}`)
+		return c.json({ error: String(err) }, 500)
+	}
+})
 
-	const result = await sock.sendMessage(jid, {
-		document: { url: filePath },
-		fileName: filename || filePath.split('/').pop() || 'file',
-		mimetype: mimetype || 'application/octet-stream'
-	})
-	console.log(`📄 已发送文件到 ${to}: ${filePath}`)
+// 单独标记已读 API
+app.post('/read', async (c) => {
+	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
 
-	return c.json({ success: true, messageId: result?.key.id })
+	const { messageKey } = await c.req.json()
+	if (!messageKey || !messageKey.id || !messageKey.remoteJid) {
+		return c.json({ error: '缺少 messageKey' }, 400)
+	}
+
+	try {
+		await sock.readMessages([messageKey])
+		console.log(`👁️  已标记已读: ${messageKey.id}`)
+		return c.json({ success: true })
+	} catch (err) {
+		console.log(`⚠️  标记已读失败: ${err}`)
+		return c.json({ error: String(err) }, 500)
+	}
+})
+
+// 发送 typing 状态 API
+app.post('/typing', async (c) => {
+	if (!sock) return c.json({ error: '未连接 WhatsApp' }, 503)
+
+	const { to, action = 'composing' } = await c.req.json()
+	if (!to) {
+		return c.json({ error: '缺少 to' }, 400)
+	}
+
+	const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
+	const validActions = ['composing', 'recording', 'paused']
+
+	if (!validActions.includes(action)) {
+		return c.json({ error: `action 必须是 ${validActions.join('/')}` }, 400)
+	}
+
+	try {
+		await sock.sendPresenceUpdate(action, jid)
+		console.log(`⌨️  已发送 ${action} 状态到 ${to}`)
+		return c.json({ success: true })
+	} catch (err) {
+		console.log(`⚠️  发送状态失败: ${err}`)
+		return c.json({ error: String(err) }, 500)
+	}
 })
 
 // ============ 启动 ============
